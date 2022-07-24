@@ -23,9 +23,9 @@ use map::{HashMap2, HashSet4};
 
 fn logsumexp(a: f64, b: f64) -> f64 {
     if a > b {
-        a + ((b - a).exp() + 1.0).ln()
+        a + (b - a).exp().ln_1p()
     } else {
-        b + ((a - b).exp() + 1.0).ln()
+        b + (a - b).exp().ln_1p()
     }
 }
 
@@ -45,6 +45,7 @@ pub struct Aligner {
 }
 
 impl Aligner {
+    #[must_use]
     pub fn new(sentences: &[Sentence], tag_index: usize) -> Self {
         let mut dataset: Vec<(Vec<char>, Vec<char>)> = vec![];
         for sentence in sentences {
@@ -52,7 +53,7 @@ impl Aligner {
                 let phoneme = token
                     .tags()
                     .get(tag_index)
-                    .and_then(|x| x.as_ref())
+                    .and_then(Option::as_ref)
                     .map_or("", |x| x.as_ref());
                 dataset.push((token.surface().chars().collect(), phoneme.chars().collect()));
             }
@@ -64,7 +65,7 @@ impl Aligner {
         for (surface, phoneme) in &dataset {
             cnt += surface.len() * phoneme.len();
         }
-        let init_score = -(cnt as f64).ln();
+        let init_score = -f64::from(u32::try_from(cnt).unwrap()).ln();
         for (surface, phoneme) in &dataset {
             for i in 0..surface.len() {
                 for j in 0..phoneme.len() + 1 {
@@ -115,10 +116,10 @@ impl Aligner {
                             continue;
                         }
                         let score = *scores.get(&surface[i..p], &phoneme[j..q]).unwrap();
-                        let distance = (p - i + (q - j).max(1)) as f64;
+                        let distance = f64::from(u32::try_from(p - i + (q - j).max(1)).unwrap());
                         *alphas.get_mut(p, q).unwrap() = logsumexp(
                             *alphas.get(p, q).unwrap(),
-                            *alphas.get(i, j).unwrap() + score * distance,
+                            score.mul_add(distance, *alphas.get(i, j).unwrap()),
                         );
                     }
                 }
@@ -146,10 +147,10 @@ impl Aligner {
                             continue;
                         }
                         let score = *scores.get(&surface[i..p], &phoneme[j..q]).unwrap();
-                        let distance = (p - i + (q - j).max(1)) as f64;
+                        let distance = f64::from(u32::try_from(p - i + (q - j).max(1)).unwrap());
                         *betas.get_mut(i, j).unwrap() = logsumexp(
                             *betas.get(i, j).unwrap(),
-                            *betas.get(p, q).unwrap() + score * distance,
+                            score.mul_add(distance, *betas.get(p, q).unwrap()),
                         );
                     }
                 }
@@ -179,15 +180,15 @@ impl Aligner {
                         let surface_slice = &surface[i..p];
                         let phoneme_slice = &phoneme[j..q];
                         let score = *scores.get(surface_slice, phoneme_slice).unwrap();
-                        let distance = (p - i + (q - j).max(1)) as f64;
+                        let distance = f64::from(u32::try_from(p - i + (q - j).max(1)).unwrap());
                         let gamma = logsumexp(
                             *gammas
                                 .get(surface_slice, phoneme_slice)
                                 .unwrap_or(&f64::NEG_INFINITY),
-                            *alphas.get(i, j).unwrap()
-                                + *betas.get(p, q).unwrap()
-                                + score * distance
-                                - score_sum,
+                            score.mul_add(
+                                distance,
+                                *alphas.get(i, j).unwrap() + *betas.get(p, q).unwrap(),
+                            ) - score_sum,
                         );
                         gammas.insert(surface_slice, phoneme_slice, gamma);
                     }
@@ -220,8 +221,8 @@ impl Aligner {
                             continue;
                         }
                         let score = *scores.get(&surface[i..p], &phoneme[j..q]).unwrap();
-                        let distance = (p - i + (q - j).max(1)) as f64;
-                        let new_score = best_nodes.get(p, q).unwrap().0 + score * distance;
+                        let distance = f64::from(u32::try_from(p - i + (q - j).max(1)).unwrap());
+                        let new_score = score.mul_add(distance, best_nodes.get(p, q).unwrap().0);
                         let current_best_node = best_nodes.get_mut(i, j).unwrap();
                         if current_best_node.0 < new_score {
                             *current_best_node = (new_score, p, q);
@@ -361,11 +362,8 @@ impl Aligner {
         diff_total
     }
 
-    pub fn scores(&self) -> &HashMap2<Vec<char>, Vec<char>, f64> {
-        &self.scores
-    }
-
-    pub fn finalize(self) -> Model {
+    #[must_use]
+    pub fn finalize(self) -> PhonemeMap {
         // Searches the best paths
         let mut best_nodes = Array2d::new(0, 0);
         let mut phoneme_map = HashMap2::new();
@@ -379,22 +377,22 @@ impl Aligner {
 
         Self::merge_phonemes(&mut phoneme_map);
 
-        Model { phoneme_map }
+        PhonemeMap { phoneme_map }
     }
 }
 
-pub struct Model {
+pub struct PhonemeMap {
     phoneme_map: HashMap2<Vec<char>, Vec<char>, Vec<(usize, usize)>>,
 }
 
-impl Model {
+impl PhonemeMap {
     pub fn make_alignment(&self, sentence: &mut Sentence, tag_index: usize) {
         let mut new_boundaries = vec![];
         for token in sentence.iter_tokens() {
             let phoneme = token
                 .tags()
                 .get(tag_index)
-                .and_then(|x| x.as_ref())
+                .and_then(Option::as_ref)
                 .map_or("", |x| x.as_ref());
             let surface: Vec<_> = token.surface().chars().collect();
             let phoneme: Vec<_> = phoneme.chars().collect();
